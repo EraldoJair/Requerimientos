@@ -1,6 +1,8 @@
 import express from 'express';
 import mongoose from 'mongoose';
 import PurchaseRequest from '../models/PurchaseRequest.js';
+import Product from '../models/Product.js';
+import Warehouse from '../models/Warehouse.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -54,7 +56,8 @@ router.get('/', authenticate, async (req, res) => {
       department, 
       page = 1, 
       limit = 20,
-      search 
+      search,
+      warehouseStatus
     } = req.query;
 
     // Build filter object
@@ -72,6 +75,10 @@ router.get('/', authenticate, async (req, res) => {
       filter['requestor.department'] = department;
     }
 
+    if (warehouseStatus && warehouseStatus !== 'all') {
+      filter['warehouseInfo.warehouseStatus'] = warehouseStatus;
+    }
+
     // Text search
     if (search) {
       filter.$text = { $search: search };
@@ -87,6 +94,9 @@ router.get('/', authenticate, async (req, res) => {
     const requests = await PurchaseRequest.find(filter)
       .populate('requestor.userId', 'profile.firstName profile.lastName')
       .populate('approvalFlow.userId', 'profile.firstName profile.lastName')
+      .populate('warehouseInfo.assignedWarehouse', 'name location')
+      .populate('warehouseInfo.productId', 'name code')
+      .populate('warehouseInfo.warehouseReceipt')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit));
@@ -113,6 +123,134 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
+// Get approved requests ready for warehouse assignment
+router.get('/approved-for-warehouse', authenticate, async (req, res) => {
+  try {
+    const requests = await PurchaseRequest.getApprovedForWarehouse()
+      .populate('requestor.userId', 'profile.firstName profile.lastName');
+
+    res.json({
+      success: true,
+      requests
+    });
+
+  } catch (error) {
+    console.error('Get approved requests error:', error);
+    res.status(500).json({ 
+      success: false,
+      message: 'Server error fetching approved requests'
+    });
+  }
+});
+
+// Assign warehouse to approved request
+router.post('/:id/assign-warehouse', authenticate, async (req, res) => {
+  const session = await mongoose.startSession();
+  
+  try {
+    await session.withTransaction(async () => {
+      const { warehouseId, productId, expectedDeliveryDate } = req.body;
+      
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+        throw new Error('Invalid request ID format');
+      }
+
+      const request = await PurchaseRequest.findById(req.params.id).session(session);
+      
+      if (!request) {
+        throw new Error('Purchase request not found');
+      }
+
+      if (request.status !== 'approved') {
+        throw new Error('Request must be approved before warehouse assignment');
+      }
+
+      // Verify warehouse exists
+      const warehouse = await Warehouse.findById(warehouseId).session(session);
+      if (!warehouse) {
+        throw new Error('Warehouse not found');
+      }
+
+      // Create or find product
+      let product;
+      if (productId) {
+        product = await Product.findById(productId).session(session);
+      } else {
+        // Create new product from request details
+        product = new Product({
+          name: request.requestDetails.description,
+          code: request.requestDetails.specifications.partNumber || `AUTO-${Date.now()}`,
+          description: request.requestDetails.description,
+          category: request.requestDetails.itemType,
+          unitOfMeasure: request.requestDetails.specifications.unitOfMeasure,
+          specifications: {
+            brand: request.requestDetails.specifications.brand,
+            model: request.requestDetails.specifications.model,
+            technicalSpecs: request.requestDetails.specifications.technicalSpecs
+          },
+          pricing: {
+            standardCost: request.requestDetails.estimatedCost / request.requestDetails.specifications.quantity,
+            currency: request.requestDetails.currency
+          },
+          createdBy: req.user._id
+        });
+        await product.save({ session });
+      }
+
+      // Update request with warehouse information
+      request.warehouseInfo = {
+        assignedWarehouse: warehouseId,
+        productId: product._id,
+        pendingQuantity: request.requestDetails.specifications.quantity,
+        warehouseStatus: 'assigned',
+        assignedDate: new Date(),
+        expectedDeliveryDate: expectedDeliveryDate ? new Date(expectedDeliveryDate) : null
+      };
+      
+      request.status = 'in_warehouse';
+      request.audit.modifiedBy = req.user._id;
+      request.audit.version += 1;
+      
+      // Add to audit log
+      request.audit.changeLog.push({
+        field: 'warehouseInfo',
+        oldValue: 'pending_assignment',
+        newValue: 'assigned',
+        changedBy: req.user._id,
+        changedAt: new Date(),
+        reason: `Assigned to warehouse: ${warehouse.name}`
+      });
+
+      await request.save({ session });
+
+      await request.populate([
+        { path: 'warehouseInfo.assignedWarehouse', select: 'name location' },
+        { path: 'warehouseInfo.productId', select: 'name code' }
+      ]);
+
+      res.json({
+        success: true,
+        message: 'Warehouse assigned successfully',
+        request
+      });
+    });
+
+  } catch (error) {
+    console.error('Assign warehouse error:', error);
+    
+    const statusCode = error.message.includes('not found') ? 404 :
+                      error.message.includes('must be approved') ? 400 :
+                      error.message.includes('Invalid') ? 400 : 500;
+    
+    res.status(statusCode).json({ 
+      success: false,
+      message: error.message || 'Server error assigning warehouse'
+    });
+  } finally {
+    await session.endSession();
+  }
+});
+
 // Get single purchase request
 router.get('/:id', authenticate, async (req, res) => {
   try {
@@ -128,7 +266,10 @@ router.get('/:id', authenticate, async (req, res) => {
       .populate('requestor.userId', 'profile.firstName profile.lastName')
       .populate('approvalFlow.userId', 'profile.firstName profile.lastName')
       .populate('audit.createdBy', 'profile.firstName profile.lastName')
-      .populate('audit.modifiedBy', 'profile.firstName profile.lastName');
+      .populate('audit.modifiedBy', 'profile.firstName profile.lastName')
+      .populate('warehouseInfo.assignedWarehouse', 'name location responsibleUser')
+      .populate('warehouseInfo.productId', 'name code description')
+      .populate('warehouseInfo.warehouseReceipt');
 
     if (!request) {
       return res.status(404).json({ 
@@ -183,6 +324,11 @@ router.post('/', authenticate, validatePurchaseRequest, async (req, res) => {
         },
         audit: {
           createdBy: req.user._id
+        },
+        warehouseInfo: {
+          warehouseStatus: 'pending_assignment',
+          receivedQuantity: 0,
+          pendingQuantity: req.body.requestDetails.specifications.quantity
         }
       };
 
@@ -348,6 +494,8 @@ router.post('/:id/action', authenticate, async (req, res) => {
         );
         if (allApproved) {
           request.status = 'approved';
+          // When approved, set warehouse status to pending assignment
+          request.warehouseInfo.warehouseStatus = 'pending_assignment';
         }
       }
 
@@ -419,7 +567,10 @@ router.get('/stats/dashboard', authenticate, async (req, res) => {
       PurchaseRequest.countDocuments({ 
         'requestDetails.criticality': 'critical',
         status: 'pending'
-      })
+      }),
+      PurchaseRequest.countDocuments({ status: 'in_warehouse' }),
+      PurchaseRequest.countDocuments({ status: 'received' }),
+      PurchaseRequest.countDocuments({ status: 'completed' })
     ]);
 
     res.json({
@@ -429,7 +580,10 @@ router.get('/stats/dashboard', authenticate, async (req, res) => {
         approved: stats[1],
         rejected: stats[2],
         criticalPending: stats[3],
-        total: stats[0] + stats[1] + stats[2]
+        inWarehouse: stats[4],
+        received: stats[5],
+        completed: stats[6],
+        total: stats[0] + stats[1] + stats[2] + stats[4] + stats[5] + stats[6]
       }
     });
 
@@ -438,62 +592,6 @@ router.get('/stats/dashboard', authenticate, async (req, res) => {
     res.status(500).json({ 
       success: false,
       message: 'Server error fetching dashboard statistics'
-    });
-  }
-});
-
-// Endpoint de prueba (temporal)
-router.post('/test', authenticate, async (req, res) => {
-  try {
-    console.log('Test endpoint hit with user:', req.user._id);
-    console.log('Request body:', req.body);
-    
-    const testDoc = {
-      requestor: {
-        userId: req.user._id,
-        name: "Test User",
-        role: "technical_field",
-        department: "maintenance",
-        location: "plant_1"
-      },
-      requestDetails: {
-        itemType: "consumable",
-        description: "Test item for database connection",
-        specifications: {
-          quantity: 1,
-          unitOfMeasure: "units"
-        },
-        criticality: "low",
-        justification: "Testing database connection and model validation",
-        estimatedCost: 100,
-        currency: "USD",
-        requiredDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days from now
-      },
-      approvalFlow: [{
-        level: 1,
-        role: "supervisor_maintenance",
-        status: "pending"
-      }],
-      audit: {
-        createdBy: req.user._id
-      }
-    };
-    
-    const testRequest = new PurchaseRequest(testDoc);
-    await testRequest.save();
-    
-    res.json({
-      success: true,
-      message: "Test document created successfully",
-      id: testRequest._id
-    });
-    
-  } catch (error) {
-    console.error('Test error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      stack: error.stack
     });
   }
 });

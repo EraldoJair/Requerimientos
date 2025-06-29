@@ -5,7 +5,7 @@ export interface PurchaseRequest {
   requestNumber: string;
   createdAt: string;
   updatedAt: string;
-  status: 'pending' | 'approved' | 'rejected' | 'cancelled';
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'in_warehouse' | 'received' | 'completed';
   
   requestor: {
     userId: string;
@@ -49,12 +49,36 @@ export interface PurchaseRequest {
     actionDate?: string;
     timeToAction?: number;
   }>;
+
+  // NUEVA SECCIÓN: Información de Almacén
+  warehouseInfo?: {
+    assignedWarehouse?: {
+      _id: string;
+      name: string;
+      location: string;
+    };
+    productId?: {
+      _id: string;
+      name: string;
+      code: string;
+    };
+    warehouseReceipt?: string;
+    receivedQuantity: number;
+    pendingQuantity: number;
+    warehouseStatus: 'pending_assignment' | 'assigned' | 'in_transit' | 'received_partial' | 'received_complete';
+    assignedDate?: string;
+    expectedDeliveryDate?: string;
+    actualDeliveryDate?: string;
+  };
   
   metrics: {
     totalApprovalTime?: number;
     escalations: number;
     slaCompliance: boolean;
   };
+
+  // Virtual fields
+  completionPercentage?: number;
 }
 
 interface PurchaseStore {
@@ -67,6 +91,8 @@ interface PurchaseStore {
   approveRequest: (id: string, level: number, comments?: string) => Promise<void>;
   rejectRequest: (id: string, level: number, comments: string) => Promise<void>;
   getPendingApprovals: () => Promise<void>;
+  getApprovedForWarehouse: () => Promise<PurchaseRequest[]>;
+  assignWarehouse: (requestId: string, warehouseId: string, productId?: string, expectedDeliveryDate?: string) => Promise<void>;
 }
 
 const API_BASE_URL = 'http://localhost:3001/api';
@@ -242,6 +268,54 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     } catch (error) {
       set({ error: 'Network error fetching pending approvals', loading: false });
       console.error('Get pending approvals error:', error);
+    }
+  },
+
+  getApprovedForWarehouse: async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/purchases/approved-for-warehouse`, {
+        headers: getAuthHeaders(),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return data.requests;
+      } else {
+        const errorData = await response.json();
+        throw new Error(errorData.message);
+      }
+    } catch (error) {
+      console.error('Get approved for warehouse error:', error);
+      throw error;
+    }
+  },
+
+  assignWarehouse: async (requestId, warehouseId, productId, expectedDeliveryDate) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/purchases/${requestId}/assign-warehouse`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          warehouseId,
+          productId,
+          expectedDeliveryDate
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        set(state => ({
+          requests: state.requests.map(req => 
+            req._id === requestId ? data.request : req
+          )
+        }));
+      } else {
+        const errorData = await response.json();
+        throw new Error(errorData.message);
+      }
+    } catch (error) {
+      console.error('Assign warehouse error:', error);
+      throw error;
     }
   }
 }));

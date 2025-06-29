@@ -7,6 +7,7 @@ import connectDB from './config/database.js';
 import authRoutes from './routes/auth.js';
 import purchaseRoutes from './routes/purchases.js';
 import userRoutes from './routes/users.js';
+import warehouseRoutes from './routes/warehouses.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 dotenv.config();
@@ -39,6 +40,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/api/auth', authRoutes);
 app.use('/api/purchases', purchaseRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/warehouses', warehouseRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -67,6 +69,7 @@ const startServer = async () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📊 Environment: ${process.env.NODE_ENV}`);
       console.log(`🔗 API URL: http://localhost:${PORT}/api`);
+      console.log(`📦 Warehouse module: ENABLED`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);

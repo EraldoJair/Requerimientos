@@ -12,7 +12,8 @@ import {
   LogOut,
   Menu,
   X,
-  Shield
+  Shield,
+  Package
 } from 'lucide-react';
 
 const Layout = () => {
@@ -26,6 +27,7 @@ const Layout = () => {
     { name: 'Solicitudes', href: '/requests', icon: FileText },
     { name: 'Nueva Solicitud', href: '/requests/new', icon: Plus },
     { name: 'Aprobaciones', href: '/approvals', icon: CheckCircle },
+    { name: 'Almacenes', href: '/warehouse', icon: Package },
     { name: 'Analytics', href: '/analytics', icon: BarChart3 },
     ...(user?.permissions.specialPermissions?.includes('user_management') 
        ? [{ name: 'Usuarios', href: '/users', icon: Users }] 

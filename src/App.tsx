@@ -9,6 +9,7 @@ import CreateRequest from './components/CreateRequest';
 import ApprovalQueue from './components/ApprovalQueue';
 import Analytics from './components/Analytics';
 import UserManagement from './components/UserManagement';
+import Warehouse from './components/Warehouse';
 import Layout from './components/Layout';
 
 function App() {
@@ -43,6 +44,7 @@ function App() {
               <Route path="requests" element={<PurchaseRequests />} />
               <Route path="requests/new" element={<CreateRequest />} />
               <Route path="approvals" element={<ApprovalQueue />} />
+              <Route path="warehouse" element={<Warehouse />} />
               <Route path="analytics" element={<Analytics />} />
               <Route path="users" element={<UserManagement />} />
             </Route>

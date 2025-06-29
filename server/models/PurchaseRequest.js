@@ -15,7 +15,7 @@ const purchaseRequestSchema = new mongoose.Schema({
   
   status: {
     type: String,
-    enum: ['pending', 'approved', 'rejected', 'cancelled'],
+    enum: ['pending', 'approved', 'rejected', 'cancelled', 'in_warehouse', 'received', 'completed'],
     default: 'pending',
     required: true
   },
@@ -162,6 +162,38 @@ const purchaseRequestSchema = new mongoose.Schema({
     timeToAction: Number // in seconds
   }],
   
+  // NUEVA SECCIÓN: Información de Almacén
+  warehouseInfo: {
+    assignedWarehouse: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Warehouse'
+    },
+    productId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Product'
+    },
+    warehouseReceipt: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'WarehouseReceipt'
+    },
+    receivedQuantity: {
+      type: Number,
+      default: 0
+    },
+    pendingQuantity: {
+      type: Number,
+      default: 0
+    },
+    warehouseStatus: {
+      type: String,
+      enum: ['pending_assignment', 'assigned', 'in_transit', 'received_partial', 'received_complete'],
+      default: 'pending_assignment'
+    },
+    assignedDate: Date,
+    expectedDeliveryDate: Date,
+    actualDeliveryDate: Date
+  },
+  
   metrics: {
     totalApprovalTime: Number,
     escalations: {
@@ -204,7 +236,7 @@ const purchaseRequestSchema = new mongoose.Schema({
     }]
   }
 }, {
-  timestamps: true, // Adds createdAt and updatedAt automatically
+  timestamps: true,
   toJSON: { virtuals: true },
   toObject: { virtuals: true }
 });
@@ -216,6 +248,7 @@ purchaseRequestSchema.index({ 'requestor.department': 1 });
 purchaseRequestSchema.index({ 'requestDetails.criticality': 1 });
 purchaseRequestSchema.index({ 'approvalFlow.role': 1, 'approvalFlow.status': 1 });
 purchaseRequestSchema.index({ requestNumber: 1 });
+purchaseRequestSchema.index({ 'warehouseInfo.warehouseStatus': 1 });
 
 // Text search index
 purchaseRequestSchema.index({
@@ -236,12 +269,35 @@ purchaseRequestSchema.virtual('nextApproverRole').get(function() {
   return pending ? pending.role : null;
 });
 
+// Virtual for completion percentage
+purchaseRequestSchema.virtual('completionPercentage').get(function() {
+  if (this.warehouseInfo.receivedQuantity === 0) return 0;
+  return Math.round((this.warehouseInfo.receivedQuantity / this.requestDetails.specifications.quantity) * 100);
+});
+
 // Pre-save middleware
 purchaseRequestSchema.pre('save', function(next) {
   // Update modifiedBy if document is being modified (not created)
   if (!this.isNew && this.isModified()) {
     this.updatedAt = new Date();
   }
+  
+  // Auto-calculate pending quantity
+  if (this.warehouseInfo.receivedQuantity !== undefined) {
+    this.warehouseInfo.pendingQuantity = this.requestDetails.specifications.quantity - this.warehouseInfo.receivedQuantity;
+  }
+  
+  // Auto-update warehouse status based on quantities
+  if (this.warehouseInfo.receivedQuantity > 0) {
+    if (this.warehouseInfo.receivedQuantity >= this.requestDetails.specifications.quantity) {
+      this.warehouseInfo.warehouseStatus = 'received_complete';
+      this.status = 'completed';
+    } else {
+      this.warehouseInfo.warehouseStatus = 'received_partial';
+      this.status = 'received';
+    }
+  }
+  
   next();
 });
 
@@ -255,6 +311,16 @@ purchaseRequestSchema.statics.getPendingForRole = function(role) {
         status: 'pending'
       }
     }
+  })
+  .populate('requestor.userId', 'profile.firstName profile.lastName')
+  .sort({ 'requestDetails.criticality': 1, createdAt: 1 });
+};
+
+// Static method to get approved requests ready for warehouse
+purchaseRequestSchema.statics.getApprovedForWarehouse = function() {
+  return this.find({
+    status: 'approved',
+    'warehouseInfo.warehouseStatus': 'pending_assignment'
   })
   .populate('requestor.userId', 'profile.firstName profile.lastName')
   .sort({ 'requestDetails.criticality': 1, createdAt: 1 });
